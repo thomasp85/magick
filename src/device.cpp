@@ -9,22 +9,6 @@
 #include "magick_types.h"
 #include <R_ext/GraphicsEngine.h>
 
-// Magick Device Parameters
-class MagickDevice {
-public:
-  XPtrImage ptr;
-  bool multipage;
-  double clipleft, clipright, cliptop, clipbottom;
-  MagickDevice(bool multipage_):
-    ptr(XPtrImage(new Image())),
-    multipage(multipage_),
-    clipleft(0), clipright(0), cliptop(0), clipbottom(0){}
-  MagickDevice(bool multipage_, Image * image):
-    ptr(XPtrImage(image)),
-    multipage(multipage_),
-    clipleft(0), clipright(0), cliptop(0), clipbottom(0){}
-};
-
 //from 'svglite' source: 1 lwd = 1/96", but units in rest of document are 1/72"
 #define xlwd (72.0/96.0)
 
@@ -39,6 +23,25 @@ typedef std::container<Magick::Drawable> drawlist;
 typedef std::container<Magick::Coordinate> coordlist;
 typedef std::container<Magick::VPath> pathlist;
 
+// Magick Device Parameters
+class MagickDevice {
+public:
+  XPtrImage ptr;
+  bool multipage;
+  double clipleft, clipright, cliptop, clipbottom;
+  drawlist * queue;
+  MagickDevice(bool multipage_):
+    ptr(XPtrImage(new Image())),
+    multipage(multipage_),
+    clipleft(0), clipright(0), cliptop(0), clipbottom(0),
+    queue(new drawlist()){}
+  MagickDevice(bool multipage_, Image * image):
+    ptr(XPtrImage(image)),
+    multipage(multipage_),
+    clipleft(0), clipright(0), cliptop(0), clipbottom(0),
+    queue(new drawlist()){}
+};
+
 static inline bool same(double x, double y){
   return std::abs(x - y) < 0.5;
 }
@@ -52,6 +55,10 @@ static inline MagickDevice * getdev(pDevDesc dd){
 
 static inline XPtrImage getptr(pDevDesc dd){
   return getdev(dd)->ptr;
+}
+
+static inline drawlist * getqueue(pDevDesc dd){
+  return getdev(dd)->queue;
 }
 
 static inline Image * getimage(pDevDesc dd){
@@ -142,26 +149,25 @@ static void image_draw(drawlist x, const pGEcontext gc, pDevDesc dd){
   double lwd = gc->lwd * xlwd * multiplier;
   double lty[10] = {0};
   Frame * graph = getgraph(dd);
-  drawlist draw;
+  drawlist * queue = getqueue(dd);
   if(gc->col != NA_INTEGER)
-    draw.push_back(Magick::DrawableStrokeColor(Color(col2name(gc->col))));
+    queue->push_back(Magick::DrawableStrokeColor(Color(col2name(gc->col))));
   if(gc->fill != NA_INTEGER)
-    draw.push_back(Magick::DrawableFillColor(Color(col2name(gc->fill))));
-  draw.push_back(Magick::DrawableStrokeWidth(lwd));
-  draw.push_back(Magick::DrawableStrokeLineCap(linecap(gc->lend)));
-  draw.push_back(Magick::DrawableStrokeLineJoin(linejoin(gc->ljoin)));
-  draw.push_back(Magick::DrawableMiterLimit(gc->lmitre));
-  draw.push_back(Magick::DrawableFont(gc->fontfamily, style(gc->fontface), weight(gc->fontface), Magick::NormalStretch));
-  draw.push_back(Magick::DrawablePointSize(gc->ps * gc->cex * multiplier));
+    queue->push_back(Magick::DrawableFillColor(Color(col2name(gc->fill))));
+  queue->push_back(Magick::DrawableStrokeWidth(lwd));
+  queue->push_back(Magick::DrawableStrokeLineCap(linecap(gc->lend)));
+  queue->push_back(Magick::DrawableStrokeLineJoin(linejoin(gc->ljoin)));
+  queue->push_back(Magick::DrawableMiterLimit(gc->lmitre));
+  queue->push_back(Magick::DrawableFont(gc->fontfamily, style(gc->fontface), weight(gc->fontface), Magick::NormalStretch));
+  queue->push_back(Magick::DrawablePointSize(gc->ps * gc->cex * multiplier));
 #if MagickLibVersion >= 0x700
-  draw.push_back(Magick::DrawableStrokeDashArray(linetype(lty, gc->lty, lwd)));
-  draw.insert(draw.end(), x.begin(), x.end());
+  queue->push_back(Magick::DrawableStrokeDashArray(linetype(lty, gc->lty, lwd)));
+  queue->insert(queue->end(), x.begin(), x.end());
 #else
-  draw.push_back(Magick::DrawableDashArray(linetype(lty, gc->lty, lwd)));
-  draw.splice(draw.end(), x);
+  queue->push_back(Magick::DrawableDashArray(linetype(lty, gc->lty, lwd)));
+  queue->splice(queue->end(), x);
 #endif
   graph->gamma(gc->gamma);
-  graph->draw(draw);
 }
 
 static void image_draw(Magick::Drawable x, const pGEcontext gc, pDevDesc dd){
@@ -171,6 +177,14 @@ static void image_draw(Magick::Drawable x, const pGEcontext gc, pDevDesc dd){
 }
 
 /* ~~~ CALLBACK FUNCTIONS START HERE ~~~ */
+
+static int image_flush(pDevDesc dd, int level){
+  if(level < 0 && getdev(dd)->queue->size() > 0){
+    getgraph(dd)->draw(*getdev(dd)->queue);
+    getdev(dd)->queue->clear();
+  }
+  return 0;
+}
 
 static void image_new_page(const pGEcontext gc, pDevDesc dd) {
   BEGIN_RCPP
@@ -287,6 +301,7 @@ static void image_raster(unsigned int *raster, int w, int h,
                 Rboolean interpolate,
                 const pGEcontext gc, pDevDesc dd) {
   BEGIN_RCPP
+  image_flush(dd, -1);
   Frame * graph = getgraph(dd);
   Frame frame(w, h, std::string("RGBA"), Magick::CharPixel, raster);
   frame.backgroundColor(Color("transparent"));
@@ -305,6 +320,7 @@ static void image_raster(unsigned int *raster, int w, int h,
 /* TODO: somehow R adds another protect */
 static void image_close(pDevDesc dd) {
   BEGIN_RCPP
+  image_flush(dd, -1);
   XPtrImage ptr = getptr(dd);
   MagickDevice * device = (MagickDevice *) dd->deviceSpecific;
   delete device;
@@ -317,6 +333,7 @@ static void image_close(pDevDesc dd) {
 static void image_text(double x, double y, const char *str, double rot,
                 double hadj, const pGEcontext gc, pDevDesc dd) {
   BEGIN_RCPP
+  image_flush(dd, -1);
   double multiplier = 1/dd->ipr[0]/72;
   Frame * graph = getgraph(dd);
 #if MagickLibVersion >= 0x692
@@ -425,6 +442,7 @@ static pDevDesc magick_driver_new(MagickDevice * device, int bg, int width, int 
   dd->metricInfo = image_metric_info;
   dd->cap = NULL;
   dd->raster = image_raster;
+  dd->holdflush = image_flush;
 
   // UTF-8 support
   dd->wantSymbolUTF8 = (Rboolean) 1;
