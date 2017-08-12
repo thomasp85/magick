@@ -20,8 +20,9 @@ SystemRequirements: ImageMagick++: ImageMagick-c++-devel (rpm) or libmagick++-de
 VignetteBuilder: knitr
 Imports:
     Rcpp (>= 0.12.12),
+    gdtools (>= 0.1.2),
     curl
-LinkingTo: Rcpp
+LinkingTo: Rcpp, gdtools
 Suggests:
     knitr,
     rmarkdown,

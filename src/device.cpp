@@ -8,22 +8,26 @@
  */
 #include "magick_types.h"
 #include <R_ext/GraphicsEngine.h>
+#include <gdtools.h>
 #define pi 3.14159265359
 
 // Magick Device Parameters
 class MagickDevice {
 public:
   XPtrImage ptr;
+  XPtrCairoContext cc;
   bool drawing;
   bool antialias;
   double clipleft, clipright, cliptop, clipbottom;
   MagickDevice(bool drawing_, bool antialias_):
     ptr(XPtrImage(new Image())),
+    cc(gdtools::context_create()),
     drawing(drawing_),
     antialias(antialias_),
     clipleft(0), clipright(0), cliptop(0), clipbottom(0){}
   MagickDevice(bool drawing_, bool antialias_, Image * image):
     ptr(XPtrImage(image)),
+    cc(gdtools::context_create()),
     drawing(drawing_),
     antialias(antialias_),
     clipleft(0), clipright(0), cliptop(0), clipbottom(0){}
@@ -72,6 +76,10 @@ static inline bool is_bold(int face) {
 
 static inline bool is_italic(int face) {
   return face == 3 || face == 4;
+}
+
+inline bool is_bolditalic(int face) {
+  return face == 4;
 }
 
 static inline bool is_symbol(int face) {
@@ -133,7 +141,7 @@ static inline int weight(int face){
   return is_bold(face) ? 700 : 400;
 }
 
-static inline std::string fontname(const pGEcontext gc){
+static inline std::string fontfamily(const pGEcontext gc){
   if(is_symbol(gc->fontface))
     return std::string("symbol");
   if(!strlen(gc->fontfamily))
@@ -143,6 +151,48 @@ static inline std::string fontname(const pGEcontext gc){
   if(!strncmp(gc->fontfamily, "mono", 4) || !strncmp(gc->fontfamily, "Mono", 4))
     return std::string("monospace");
   return std::string(gc->fontfamily);
+}
+
+inline std::string find_alias_field(std::string& family, Rcpp::List& alias,
+                                    const char* face, const char* field) {
+  if (alias.containsElementNamed(face)) {
+    Rcpp::List font = alias[face];
+    if (font.containsElementNamed(field))
+      return font[field];
+  }
+  return std::string();
+}
+
+inline std::string find_user_alias(std::string& family,
+                                   Rcpp::List const& aliases,
+                                   int face, const char* field) {
+  std::string out;
+  if (aliases.containsElementNamed(family.c_str())) {
+    Rcpp::List alias = aliases[family];
+    if (is_bolditalic(face))
+      out = find_alias_field(family, alias, "bolditalic", field);
+    else if (is_bold(face))
+      out = find_alias_field(family, alias, "bold", field);
+    else if (is_italic(face))
+      out = find_alias_field(family, alias, "italic", field);
+    else if (is_symbol(face))
+      out = find_alias_field(family, alias, "symbol", field);
+    else
+      out = find_alias_field(family, alias, "plain", field);
+  }
+  return out;
+}
+
+
+inline std::string fontfile(const char* family_, int face,
+                            Rcpp::List user_aliases = Rcpp::List::create()) {
+  std::string family(family_);
+  if (face == 5)
+    family = "symbol";
+  else if (family == "")
+    family = "sans";
+
+  return find_user_alias(family, user_aliases, face, "file");
 }
 
 static inline coordlist coord(int n, double * x, double * y){
@@ -405,16 +455,12 @@ static void image_text(double x, double y, const char *str, double rot,
   graph->fontPointsize(ps);
   graph->strokeColor(stroke);
   graph->fillColor(fill);
-#if MagickLibVersion >= 0x692
-  graph->fontFamily(fontname(gc));
-  graph->fontWeight(weight(gc->fontface));
-  graph->fontStyle(style(gc->fontface));
-#endif
+  graph->font(fontfile(gc->fontfamily, gc->fontface));
 
   drawlist draw;
   draw.push_back(Magick::DrawableStrokeColor(stroke));
   draw.push_back(Magick::DrawableFillColor(fill));
-  draw.push_back(Magick::DrawableFont(fontname(gc), style(gc->fontface), weight(gc->fontface), Magick::NormalStretch));
+  draw.push_back(Magick::DrawableFont(fontfamily(gc), style(gc->fontface), weight(gc->fontface), Magick::NormalStretch));
   draw.push_back(Magick::DrawablePointSize(ps));
   draw.push_back(Magick::DrawableText(x, y, std::string(str), "UTF-8"));
   if(deg > 1)
@@ -442,35 +488,25 @@ static void image_metric_info(int c, const pGEcontext gc, double* ascent,
     str[1] = '\0';
   }
 
-  Frame * graph = getgraph(dd);
-  double multiplier = 1/dd->ipr[0]/72;
-  graph->fontPointsize(gc->ps * gc->cex * multiplier);
-#if MagickLibVersion >= 0x692
-  graph->fontFamily(fontname(gc));
-  graph->fontWeight(weight(gc->fontface));
-  graph->fontStyle(style(gc->fontface));
-#endif
-  Magick::TypeMetric tm;
-  graph->fontTypeMetrics(str, &tm);
-  *ascent = tm.ascent();
-  *descent = std::abs(tm.descent()); //I think this should be positive?
-  *width = tm.textWidth();
+  std::string file = fontfile(gc->fontfamily, gc->fontface);
+  std::string name = fontfamily(gc);
+  gdtools::context_set_font(getdev(dd)->cc, name, gc->cex * gc->ps, is_bold(gc->fontface), is_italic(gc->fontface), file);
+  FontMetric fm = gdtools::context_extents(getdev(dd)->cc, std::string(str));
+
+  *ascent = fm.ascent;
+  *descent = fm.descent;
+  *width = fm.width;
   VOID_END_RCPP
 }
 
 static double image_strwidth(const char *str, const pGEcontext gc, pDevDesc dd) {
   BEGIN_RCPP
-  Frame * graph = getgraph(dd);
-#if MagickLibVersion >= 0x692
-  graph->fontFamily(fontname(gc));
-  graph->fontWeight(weight(gc->fontface));
-  graph->fontStyle(style(gc->fontface));
-#endif
-  double multiplier = 1/dd->ipr[0]/72;
-  graph->fontPointsize(gc->ps * gc->cex * multiplier);
-  Magick::TypeMetric tm;
-  graph->fontTypeMetrics(str, &tm);
-  return tm.textWidth();
+  std::string file = fontfile(gc->fontfamily, gc->fontface);
+  std::string name = fontfamily(gc);
+  gdtools::context_set_font(getdev(dd)->cc, name, gc->cex * gc->ps, is_bold(gc->fontface), is_italic(gc->fontface), file);
+  FontMetric fm = gdtools::context_extents(getdev(dd)->cc, std::string(str));
+
+  return fm.width;
   VOID_END_RCPP
   return 0;
 }

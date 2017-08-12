@@ -20,6 +20,7 @@
 #' works if the current device is a magick device or suppots \link{dev.capture}.
 #'
 #' @export
+#' @importFrom gdtools raster_view
 #' @aliases image_device
 #' @rdname device
 #' @name device
